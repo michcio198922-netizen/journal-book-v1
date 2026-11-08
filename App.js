@@ -183,17 +183,36 @@ function Empty({title,body,action,onPress}) {
   );
 }
 
-function NoteCard({note,onDelete}) {
+function NoteCard({note,onDelete,onToggleBookmark,bookTitle,onOpenBook}) {
   const m = TYPE_MAP[note.type] || TYPE_MAP.idea;
   return (
-    <Pressable onLongPress={onDelete} style={s.noteCard}>
+    <Pressable onLongPress={onDelete} delayLongPress={550} style={s.noteCard}>
       <View style={s.noteTop}>
-        <Text style={s.noteType}>{m.emoji} {m.label}</Text>
-        <Text style={s.noteDate}>{dateLabel(note.createdAt)}</Text>
+        <View style={{flex:1}}>
+          <Text style={s.noteType}>{m.emoji} {m.label}</Text>
+          {bookTitle ? <Text style={s.bookmarkBook}>{bookTitle}</Text> : null}
+        </View>
+        <View style={s.noteTopRight}>
+          <Text style={s.noteDate}>{dateLabel(note.createdAt)}</Text>
+          {onToggleBookmark ? (
+            <Pressable
+              onPress={(e)=>{e?.stopPropagation?.();onToggleBookmark();}}
+              hitSlop={10}
+              style={[s.bookmarkButton,note.starred&&s.bookmarkButtonActive]}
+            >
+              <Text style={[s.bookmarkIcon,note.starred&&s.bookmarkIconActive]}>{note.starred?'★':'☆'}</Text>
+            </Pressable>
+          ) : null}
+        </View>
       </View>
       {note.image ? <Image source={{uri:note.image}} style={s.noteImage}/> : null}
       {note.text ? <Text style={s.noteText}>{note.text}</Text> : null}
       {note.page ? <Text style={s.notePage}>str. {note.page}</Text> : null}
+      {onOpenBook ? (
+        <Pressable onPress={(e)=>{e?.stopPropagation?.();onOpenBook();}} style={s.bookmarkOpen}>
+          <Text style={s.bookmarkOpenText}>OTWÓRZ KSIĄŻKĘ →</Text>
+        </Pressable>
+      ) : null}
     </Pressable>
   );
 }
@@ -256,6 +275,11 @@ export default function App() {
     data.books.forEach(b => (b.notes||[]).forEach(n => out.push({...n,bookId:b.id,bookTitle:b.title})));
     return out.sort((a,b)=>b.createdAt-a.createdAt);
   },[data.books]);
+
+  const bookmarkedNotes = useMemo(
+    () => allNotes.filter(n=>n.starred),
+    [allNotes]
+  );
 
   const daily = useMemo(() => {
     const pool = allNotes.filter(n=>n.type!=='photo' && (n.text||'').trim());
@@ -349,6 +373,20 @@ export default function App() {
         setData(d=>({...d,books:d.books.map(b=>b.id===selected.id?{...b,notes:(b.notes||[]).filter(n=>n.id!==id)}:b)}));
       }}
     ]);
+  }
+
+  function toggleBookmark(bookId,noteId) {
+    setData(d=>({
+      ...d,
+      books:d.books.map(b=>b.id===bookId
+        ? {...b,notes:(b.notes||[]).map(n=>n.id===noteId?{...n,starred:!n.starred}:n)}
+        : b)
+    }));
+  }
+
+  function openBookFromBookmarks(bookId) {
+    setSelectedId(bookId);
+    setTab('books');
   }
 
   function openMemory(book=selected) {
@@ -541,6 +579,34 @@ export default function App() {
     );
   }
 
+  function BookmarksScreen() {
+    return (
+      <View style={{flex:1}}>
+        <Header title="Zakładki" subtitle="NAJWAŻNIEJSZE NOTATKI"/>
+        {bookmarkedNotes.length===0 ? (
+          <Empty
+            title="Nie masz jeszcze zakładek"
+            body="Przy dowolnej notatce kliknij ☆. Zmieni się w ★ i pojawi się tutaj."
+          />
+        ) : (
+          <FlatList
+            data={bookmarkedNotes}
+            keyExtractor={n=>`${n.bookId}_${n.id}`}
+            contentContainerStyle={{paddingBottom:110}}
+            renderItem={({item})=>(
+              <NoteCard
+                note={item}
+                bookTitle={item.bookTitle}
+                onToggleBookmark={()=>toggleBookmark(item.bookId,item.id)}
+                onOpenBook={()=>openBookFromBookmarks(item.bookId)}
+              />
+            )}
+          />
+        )}
+      </View>
+    );
+  }
+
   function BooksScreen() {
     return (
       <View style={{flex:1}}>
@@ -714,7 +780,14 @@ export default function App() {
             <Empty title="Ta mapa jest jeszcze pusta"
               body="Dodaj pierwszą myśl, pytanie, rzecz do zastosowania albo zdjęcie strony."
               action="+ DODAJ NOTATKĘ" onPress={()=>setNoteModal(true)}/>
-          ) : notes.map(n=><NoteCard key={n.id} note={n} onDelete={()=>deleteNote(n.id)}/>)}
+          ) : notes.map(n=>(
+            <NoteCard
+              key={n.id}
+              note={n}
+              onDelete={()=>deleteNote(n.id)}
+              onToggleBookmark={()=>toggleBookmark(selected.id,n.id)}
+            />
+          ))}
         </ScrollView>
       </View>
     );
@@ -728,7 +801,12 @@ export default function App() {
     <SafeAreaView style={s.safe}>
       <KeyboardAvoidingView style={{flex:1}} behavior={Platform.OS==='ios'?'padding':undefined}>
         <View style={s.app}>
-          {selected ? <BookScreen/> : (tab==='books'?<BooksScreen/>:tab==='today'?<TodayScreen/>:renderAdvisorScreen())}
+          {selected ? <BookScreen/> : (
+            tab==='books' ? <BooksScreen/> :
+            tab==='today' ? <TodayScreen/> :
+            tab==='saved' ? <BookmarksScreen/> :
+            renderAdvisorScreen()
+          )}
 
           {!selected ? (
             <View style={s.tabs}>
@@ -739,6 +817,10 @@ export default function App() {
               <Pressable style={s.tab} onPress={()=>setTab('today')}>
                 <Text style={[s.tabIcon,tab==='today'&&s.active]}>✦</Text>
                 <Text style={[s.tabText,tab==='today'&&s.active]}>DZISIAJ</Text>
+              </Pressable>
+              <Pressable style={s.tab} onPress={()=>setTab('saved')}>
+                <Text style={[s.tabIcon,tab==='saved'&&s.active]}>★</Text>
+                <Text style={[s.tabText,tab==='saved'&&s.active]}>ZAKŁADKI</Text>
               </Pressable>
               <Pressable style={s.tab} onPress={()=>setTab('advisor')}>
                 <Text style={[s.tabIcon,tab==='advisor'&&s.active]}>◎</Text>
@@ -814,8 +896,15 @@ export default function App() {
 
           <Modal visible={memoryModal} transparent animationType="slide" onRequestClose={()=>setMemoryModal(false)}>
             <KeyboardAvoidingView style={s.modalShade} behavior={Platform.OS==='ios'?'padding':'height'} keyboardVerticalOffset={20}>
-              <ScrollView contentContainerStyle={{flexGrow:1,justifyContent:'flex-end'}} keyboardShouldPersistTaps="handled">
-                <View style={s.sheetTall}>
+              <View style={s.sheetTall}>
+                <ScrollView
+                  style={{flex:1}}
+                  contentContainerStyle={s.memoryScrollContent}
+                  keyboardShouldPersistTaps="handled"
+                  keyboardDismissMode="on-drag"
+                  showsVerticalScrollIndicator
+                  nestedScrollEnabled
+                >
                   <Text style={s.kicker}>ZAPAMIĘTAJ TĘ KSIĄŻKĘ</Text>
                   <Text style={s.modalTitle}>3 pytania</Text>
 
@@ -864,15 +953,15 @@ export default function App() {
                     <Button label="ANULUJ" secondary onPress={()=>setMemoryModal(false)}/>
                     <Button label="ZAPISZ 3 PYTANIA" onPress={saveMemory}/>
                   </View>
-                </View>
-              </ScrollView>
+                </ScrollView>
+              </View>
             </KeyboardAvoidingView>
           </Modal>
 
           <Modal visible={recallModal} transparent animationType="slide" onRequestClose={()=>setRecallModal(false)}>
             <KeyboardAvoidingView style={s.modalShade} behavior={Platform.OS==='ios'?'padding':'height'} keyboardVerticalOffset={20}>
               <ScrollView contentContainerStyle={{flexGrow:1,justifyContent:'flex-end'}} keyboardShouldPersistTaps="handled">
-                <View style={s.sheetTall}>
+                <View style={[s.sheetTall,s.sheetTallPadded]}>
                   <Text style={s.kicker}>TRYB Z PAMIĘCI</Text>
                   <Text style={s.modalTitle}>{selected?.title||'Książka'}</Text>
                   <Text style={s.recallLead}>Bez podglądania: co pamiętasz z tej książki?</Text>
@@ -1037,16 +1126,26 @@ const s=StyleSheet.create({
   legendText:{color:C.muted,fontSize:10,fontWeight:'800'},
 
   noteCard:{backgroundColor:C.panel,borderWidth:1,borderColor:C.line,borderRadius:17,padding:16,marginBottom:12},
-  noteTop:{flexDirection:'row',justifyContent:'space-between',gap:10},
+  noteTop:{flexDirection:'row',justifyContent:'space-between',gap:10,alignItems:'flex-start'},
+  noteTopRight:{flexDirection:'row',alignItems:'center',gap:9},
   noteType:{color:C.gold,fontWeight:'900',fontSize:11},
   noteDate:{color:C.muted,fontSize:10},
+  bookmarkBook:{color:C.muted,fontSize:10,marginTop:5,fontWeight:'700'},
+  bookmarkButton:{width:34,height:34,borderRadius:999,borderWidth:1,borderColor:C.line,alignItems:'center',justifyContent:'center',marginTop:-8,marginRight:-7},
+  bookmarkButtonActive:{borderColor:C.gold,backgroundColor:'#2A2214'},
+  bookmarkIcon:{color:C.muted,fontSize:20,lineHeight:22},
+  bookmarkIconActive:{color:C.gold},
+  bookmarkOpen:{alignSelf:'flex-start',paddingTop:13,paddingBottom:1},
+  bookmarkOpenText:{color:C.gold,fontSize:9,fontWeight:'900',letterSpacing:.8},
   noteText:{color:C.text,fontSize:16,lineHeight:23,marginTop:12},
   noteImage:{width:'100%',height:220,borderRadius:12,marginTop:12,backgroundColor:C.panel2},
   notePage:{color:C.muted,fontSize:10,marginTop:10},
 
   modalShade:{flex:1,backgroundColor:'rgba(0,0,0,.78)',justifyContent:'flex-end'},
   sheet:{backgroundColor:'#11100D',borderTopLeftRadius:26,borderTopRightRadius:26,borderWidth:1,borderColor:C.line,padding:20,paddingBottom:28},
-  sheetTall:{backgroundColor:'#11100D',borderTopLeftRadius:26,borderTopRightRadius:26,borderWidth:1,borderColor:C.line,padding:20,paddingBottom:34,maxHeight:'94%'},
+  sheetTall:{backgroundColor:'#11100D',borderTopLeftRadius:26,borderTopRightRadius:26,borderWidth:1,borderColor:C.line,maxHeight:'94%',minHeight:'55%',overflow:'hidden'},
+  sheetTallPadded:{padding:20,paddingBottom:34},
+  memoryScrollContent:{padding:20,paddingBottom:46},
   modalTitle:{color:C.text,fontSize:26,fontWeight:'900',marginTop:4,marginBottom:18},
   modalActions:{flexDirection:'row',gap:10,justifyContent:'flex-end',marginTop:14,flexWrap:'wrap'},
   input:{backgroundColor:C.bg,borderWidth:1,borderColor:C.line,color:C.text,borderRadius:13,paddingHorizontal:14,paddingVertical:13,marginBottom:10,fontSize:15},
