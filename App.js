@@ -1,4 +1,3 @@
-
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Alert, FlatList, Image, KeyboardAvoidingView, Modal, Platform, Pressable,
@@ -29,12 +28,122 @@ const todayKey = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 };
+const weekKey = () => {
+  const d = new Date();
+  const day = d.getDay() || 7;
+  d.setHours(0,0,0,0);
+  d.setDate(d.getDate() - day + 1);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+};
 const dailyIndex = len => {
   if (!len) return 0;
   const k = todayKey();
   let h = 0;
   for (let i=0;i<k.length;i++) h = ((h<<5)-h)+k.charCodeAt(i);
   return Math.abs(h)%len;
+};
+const emptyMemory = () => ({sentences:['','',''],meaning:'',action:'',updatedAt:null});
+const getMemory = book => {
+  const m = book?.memory || {};
+  return {
+    sentences:[...(m.sentences || []),'','',''].slice(0,3),
+    meaning:m.meaning || '',
+    action:m.action || '',
+    updatedAt:m.updatedAt || null,
+    lastRecallAt:m.lastRecallAt || null,
+    lastRecallText:m.lastRecallText || ''
+  };
+};
+const memorySentenceCount = book => getMemory(book).sentences.filter(x => x.trim()).length;
+const memoryComplete = book => {
+  const m = getMemory(book);
+  return m.sentences.every(x=>x.trim()) && m.meaning.trim() && m.action.trim();
+};
+
+
+const ADVISOR_STOP = new Set([
+  'i','a','ale','albo','bo','by','byc','być','co','czy','do','dla','gdy','gdzie','go','ja','jak','jest','juz','już','kiedy',
+  'mi','mnie','na','nad','nie','o','od','po','pod','przez','sie','się','to','tu','w','we','z','za','ze','że','mam','moge','mogę',
+  'chce','chcę','bardzo','teraz','dzis','dziś','ten','ta','te','tego','tej','tym','swoj','swój','swoja','swoją','moj','mój','moja'
+]);
+const ADVISOR_TOPICS = [
+  ['skupienie','skupic','skupić','koncentracja','koncentrowac','koncentrować','deep','gleboka','głęboka','praca','rozproszenie','rozpraszanie'],
+  ['telefon','smartfon','scroll','scrollowanie','instagram','youtube','social','media','powiadomienia','bodzce','bodźce'],
+  ['dyscyplina','regularnosc','regularność','konsekwencja','nawyk','nawyki','rutyna','system'],
+  ['motywacja','motywacji','energia','checi','chęci','prokrastynacja','odkladanie','odkładanie'],
+  ['strach','lek','lęk','obawa','stres','presja','emocje','emocja','nerwy'],
+  ['trading','trade','rynek','setup','wejscie','wejście','stop','loss','risk','ryzyko','rr'],
+  ['decyzja','decyzje','wybor','wybór','wybierac','wybierać','problem','rozwiazanie','rozwiązanie'],
+  ['czas','plan','planowanie','priorytet','priorytety','zadanie','zadania','termin'],
+  ['sen','spac','spać','zmeczenie','zmęczenie','odpoczynek','regeneracja']
+];
+const normalizeAdvisor = value => String(value||'')
+  .toLowerCase()
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g,'')
+  .replace(/[^a-z0-9\s-]/g,' ')
+  .replace(/\s+/g,' ')
+  .trim();
+const advisorTokens = value => normalizeAdvisor(value)
+  .split(' ')
+  .map(x=>x.trim())
+  .filter(x=>x.length>2 && !ADVISOR_STOP.has(x));
+const expandAdvisorTokens = tokens => {
+  const set = new Set(tokens);
+  ADVISOR_TOPICS.forEach(group => {
+    const normGroup = group.map(normalizeAdvisor);
+    if (normGroup.some(x=>set.has(x))) normGroup.forEach(x=>set.add(x));
+  });
+  return [...set];
+};
+const advisorSourcesForBook = book => {
+  const out=[];
+  (book.notes||[]).forEach(note=>{
+    if ((note.text||'').trim() && note.type!=='photo') out.push({
+      id:`note_${book.id}_${note.id}`,bookId:book.id,bookTitle:book.title,
+      label:TYPE_MAP[note.type]?.label||'Notatka',type:note.type,kind:'note',
+      text:note.text.trim(),page:note.page||''
+    });
+  });
+  const m=getMemory(book);
+  m.sentences.forEach((text,index)=>{
+    if ((text||'').trim()) out.push({
+      id:`memory_${book.id}_${index}`,bookId:book.id,bookTitle:book.title,
+      label:`Najważniejsza idea ${index+1}`,type:'remember',kind:'memory',text:text.trim(),page:''
+    });
+  });
+  if (m.meaning.trim()) out.push({
+    id:`meaning_${book.id}`,bookId:book.id,bookTitle:book.title,label:'Twoimi słowami',
+    type:'reflection',kind:'meaning',text:m.meaning.trim(),page:''
+  });
+  if (m.action.trim()) out.push({
+    id:`action_${book.id}`,bookId:book.id,bookTitle:book.title,label:'Co chciałeś zrobić inaczej',
+    type:'apply',kind:'action',text:m.action.trim(),page:''
+  });
+  return out;
+};
+const findAdvisorMatches = (books,scope,query) => {
+  const qNorm=normalizeAdvisor(query);
+  const qRaw=advisorTokens(query);
+  const qTokens=expandAdvisorTokens(qRaw);
+  if (!qRaw.length) return [];
+  const pool=(books||[])
+    .filter(b=>scope==='all'||b.id===scope)
+    .flatMap(advisorSourcesForBook);
+  return pool.map(item=>{
+    const textNorm=normalizeAdvisor(`${item.label} ${item.text}`);
+    const textTokens=new Set(advisorTokens(textNorm));
+    let score=0;
+    qTokens.forEach(t=>{
+      if (textTokens.has(t)) score+=3;
+      else if (textNorm.includes(t)) score+=1.4;
+    });
+    qRaw.forEach(t=>{ if (textNorm.includes(t)) score+=2; });
+    if (qNorm.length>5 && textNorm.includes(qNorm)) score+=8;
+    if (item.type==='apply'||item.kind==='action') score+=0.75;
+    if (item.kind==='memory') score+=0.35;
+    return {...item,score};
+  }).filter(x=>x.score>0).sort((a,b)=>b.score-a.score).slice(0,4);
 };
 
 function Header({title,subtitle,onBack,right}) {
@@ -52,13 +161,13 @@ function Header({title,subtitle,onBack,right}) {
   );
 }
 
-function Button({label,onPress,secondary,danger,small}) {
+function Button({label,onPress,secondary,danger,small,disabled}) {
   return (
-    <Pressable onPress={onPress} style={[
-      s.btn, secondary && s.btnSecondary, danger && s.btnDanger, small && s.btnSmall
+    <Pressable disabled={disabled} onPress={onPress} style={[
+      s.btn, secondary && s.btnSecondary, danger && s.btnDanger, small && s.btnSmall, disabled && s.btnDisabled
     ]}>
       <Text style={[
-        s.btnText, secondary && s.btnTextSecondary, danger && s.btnTextDanger
+        s.btnText, secondary && s.btnTextSecondary, danger && s.btnTextDanger, disabled && s.btnTextDisabled
       ]}>{label}</Text>
     </Pressable>
   );
@@ -90,12 +199,14 @@ function NoteCard({note,onDelete}) {
 }
 
 export default function App() {
-  const [data,setData] = useState({books:[]});
+  const [data,setData] = useState({books:[],weeklyFocus:null});
   const [loaded,setLoaded] = useState(false);
   const [tab,setTab] = useState('books');
   const [selectedId,setSelectedId] = useState(null);
   const [bookModal,setBookModal] = useState(false);
   const [noteModal,setNoteModal] = useState(false);
+  const [memoryModal,setMemoryModal] = useState(false);
+  const [recallModal,setRecallModal] = useState(false);
 
   const [bookTitle,setBookTitle] = useState('');
   const [bookAuthor,setBookAuthor] = useState('');
@@ -106,11 +217,26 @@ export default function App() {
   const [notePage,setNotePage] = useState('');
   const [noteImage,setNoteImage] = useState(null);
 
+  const [memorySentences,setMemorySentences] = useState(['','','']);
+  const [memoryMeaning,setMemoryMeaning] = useState('');
+  const [memoryAction,setMemoryAction] = useState('');
+
+  const [recallText,setRecallText] = useState('');
+  const [recallReveal,setRecallReveal] = useState(false);
+  const [advisorQuery,setAdvisorQuery] = useState('');
+  const [advisorScope,setAdvisorScope] = useState('all');
+  const [advisorResults,setAdvisorResults] = useState([]);
+  const [advisorAction,setAdvisorAction] = useState('');
+  const [advisorSearched,setAdvisorSearched] = useState(false);
+
   useEffect(() => {
     (async()=>{
       try {
         const raw = await AsyncStorage.getItem(STORAGE_KEY);
-        if (raw) setData(JSON.parse(raw));
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          setData({books:Array.isArray(parsed.books)?parsed.books:[],weeklyFocus:parsed.weeklyFocus||null});
+        }
       } catch(e) { console.log(e); }
       setLoaded(true);
     })();
@@ -135,6 +261,11 @@ export default function App() {
     const pool = allNotes.filter(n=>n.type!=='photo' && (n.text||'').trim());
     return pool.length ? pool[dailyIndex(pool.length)] : null;
   },[allNotes]);
+
+  const activeWeekly = useMemo(() => {
+    const w = data.weeklyFocus;
+    return w && w.weekKey===weekKey() ? w : null;
+  },[data.weeklyFocus]);
 
   async function chooseImage(setter) {
     const res = await ImagePicker.launchImageLibraryAsync({
@@ -165,7 +296,21 @@ export default function App() {
 
   function toggleFinished() {
     if (!selected) return;
-    setData(d=>({...d,books:d.books.map(b=>b.id===selected.id?{...b,finished:!b.finished}:b)}));
+    if (selected.finished) {
+      setData(d=>({...d,books:d.books.map(b=>b.id===selected.id?{...b,finished:false}:b)}));
+      return;
+    }
+    setData(d=>({...d,books:d.books.map(b=>b.id===selected.id?{...b,finished:true}:b)}));
+    setTimeout(()=>{
+      Alert.alert(
+        'Książka przeczytana ✓',
+        'Teraz odpowiedz na 3 pytania. Dzięki temu za kilka tygodni nadal będziesz pamiętać, co było w niej najważniejsze.',
+        [
+          {text:'Później',style:'cancel'},
+          {text:'3 PYTANIA',onPress:()=>openMemory(selected)}
+        ]
+      );
+    },120);
   }
 
   function deleteBook() {
@@ -173,7 +318,11 @@ export default function App() {
     Alert.alert('Usunąć książkę?','Usunięte zostaną też wszystkie notatki.',[
       {text:'Anuluj',style:'cancel'},
       {text:'Usuń',style:'destructive',onPress:()=>{
-        setData(d=>({...d,books:d.books.filter(b=>b.id!==selected.id)}));
+        setData(d=>({
+          ...d,
+          books:d.books.filter(b=>b.id!==selected.id),
+          weeklyFocus:d.weeklyFocus?.bookId===selected.id?null:d.weeklyFocus
+        }));
         setSelectedId(null);
       }}
     ]);
@@ -202,6 +351,196 @@ export default function App() {
     ]);
   }
 
+  function openMemory(book=selected) {
+    if (!book) return;
+    const current = getMemory(book);
+    let sentences = current.sentences;
+    if (!sentences.some(x=>x.trim())) {
+      const candidates = (book.notes||[])
+        .filter(n=>['remember','idea','reflection'].includes(n.type) && (n.text||'').trim())
+        .slice(0,3)
+        .map(n=>n.text.trim());
+      sentences = [...candidates,'','',''].slice(0,3);
+    }
+    setMemorySentences(sentences);
+    setMemoryMeaning(current.meaning);
+    setMemoryAction(current.action);
+    setMemoryModal(true);
+  }
+
+  function updateMemorySentence(index,value) {
+    setMemorySentences(prev => prev.map((x,i)=>i===index?value:x));
+  }
+
+  function saveMemory() {
+    if (!selected) return;
+    const sentences=memorySentences.map(x=>x.trim());
+    if (sentences.some(x=>!x)) {
+      return Alert.alert('Uzupełnij 3 zdania','Wpisz trzy najważniejsze zdania lub idee, które chcesz zachować z tej książki.');
+    }
+    if (!memoryMeaning.trim()) return Alert.alert('Pytanie 2','Napisz własnymi słowami, co te idee dla Ciebie znaczą.');
+    if (!memoryAction.trim()) return Alert.alert('Pytanie 3','Napisz, co konkretnie zrobisz inaczej dzięki tej książce.');
+    setData(d=>({...d,books:d.books.map(b=>{
+      if (b.id!==selected.id) return b;
+      const old=getMemory(b);
+      return {...b,memory:{...old,sentences,meaning:memoryMeaning.trim(),action:memoryAction.trim(),updatedAt:Date.now()}};
+    })}));
+    setMemoryModal(false);
+  }
+
+  function openRecall() {
+    if (!selected) return;
+    if (memorySentenceCount(selected)===0) {
+      return Alert.alert('Najpierw zapisz 3 pytania','Uzupełnij najważniejsze zdania, a potem użyj trybu „Z pamięci”.');
+    }
+    setRecallText('');
+    setRecallReveal(false);
+    setRecallModal(true);
+  }
+
+  function revealRecall() {
+    if (!selected) return;
+    setRecallReveal(true);
+    setData(d=>({...d,books:d.books.map(b=>{
+      if (b.id!==selected.id) return b;
+      const old=getMemory(b);
+      return {...b,memory:{...old,lastRecallAt:Date.now(),lastRecallText:recallText.trim()}};
+    })}));
+  }
+
+  function setWeeklyIdea(sentence,index) {
+    if (!selected || !sentence.trim()) return;
+    const w={
+      id:uid('week'),
+      bookId:selected.id,
+      bookTitle:selected.title,
+      sentenceIndex:index,
+      text:sentence.trim(),
+      weekKey:weekKey(),
+      setAt:Date.now()
+    };
+    setData(d=>({...d,weeklyFocus:w}));
+    Alert.alert('Idea ustawiona ✓','Będzie przypięta na ekranie „Dzisiaj” przez ten tydzień.');
+  }
+
+
+  function runAdvisor() {
+    if (advisorQuery.trim().length<3) {
+      return Alert.alert('Napisz problem','Np. „Nie mogę się skupić i ciągle sięgam po telefon”.');
+    }
+    const matches=findAdvisorMatches(data.books,advisorScope,advisorQuery);
+    setAdvisorResults(matches);
+    setAdvisorSearched(true);
+    const direct=matches.find(x=>x.type==='apply'||x.kind==='action');
+    setAdvisorAction(direct?.text||'');
+  }
+
+  function clearAdvisor() {
+    setAdvisorQuery('');
+    setAdvisorResults([]);
+    setAdvisorAction('');
+    setAdvisorSearched(false);
+  }
+
+  function saveAdvisorAction() {
+    const text=advisorAction.trim();
+    if (!text) return Alert.alert('Napisz działanie','Zapisz jedną konkretną rzecz, którą zrobisz teraz.');
+    const targetId=advisorScope!=='all' ? advisorScope : advisorResults[0]?.bookId;
+    const target=data.books.find(b=>b.id===targetId);
+    if (!target) return Alert.alert('Wybierz książkę','Wybierz konkretną książkę albo najpierw wyszukaj pasujące notatki.');
+    const n={id:uid('note'),type:'apply',text,page:'',image:null,createdAt:Date.now()};
+    setData(d=>({...d,books:d.books.map(b=>b.id===target.id?{...b,notes:[n,...(b.notes||[])]}:b)}));
+    Alert.alert('Zapisane ✓',`Działanie trafiło do „Zastosuję” w książce „${target.title}”.`);
+  }
+
+  function openAdvisorBook(bookId) {
+    setSelectedId(bookId);
+    setTab('books');
+  }
+
+  function renderAdvisorScreen() {
+    return (
+      <ScrollView contentContainerStyle={{paddingBottom:110}} keyboardShouldPersistTaps="handled">
+        <Header title="Co by powiedziała książka?" subtitle="TWOJE NOTATKI → TWÓJ PROBLEM"/>
+
+        <View style={s.advisorIntro}>
+          <Text style={s.advisorIntroTitle}>Zapytaj własną bibliotekę</Text>
+          <Text style={s.advisorIntroText}>Napisz, z czym się teraz mierzysz. Aplikacja nie korzysta z internetu — szuka odpowiedzi tylko w Twoich zapisanych myślach, 3 najważniejszych ideach i rzeczach „Zastosuję”.</Text>
+        </View>
+
+        <Text style={s.advisorLabel}>GDZIE SZUKAĆ?</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.scopeRow} keyboardShouldPersistTaps="handled">
+          <Pressable onPress={()=>{setAdvisorScope('all');setAdvisorResults([]);setAdvisorSearched(false)}} style={[s.scopeChip,advisorScope==='all'&&s.scopeChipActive]}>
+            <Text style={[s.scopeText,advisorScope==='all'&&s.scopeTextActive]}>WSZYSTKIE KSIĄŻKI</Text>
+          </Pressable>
+          {data.books.map(book=>(
+            <Pressable key={book.id} onPress={()=>{setAdvisorScope(book.id);setAdvisorResults([]);setAdvisorSearched(false)}} style={[s.scopeChip,advisorScope===book.id&&s.scopeChipActive]}>
+              <Text numberOfLines={1} style={[s.scopeText,advisorScope===book.id&&s.scopeTextActive]}>{book.title}</Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+
+        <TextInput
+          style={[s.input,s.advisorInput]}
+          placeholder="Np. Nie mogę się skupić, ciągle łapię telefon..."
+          placeholderTextColor="#716A5E"
+          value={advisorQuery}
+          onChangeText={setAdvisorQuery}
+          multiline
+          textAlignVertical="top"
+        />
+        <View style={s.advisorButtons}>
+          <Button label="SZUKAJ W MOICH NOTATKACH" onPress={runAdvisor}/>
+          {(advisorQuery||advisorSearched) ? <Button label="WYCZYŚĆ" secondary onPress={clearAdvisor}/> : null}
+        </View>
+
+        {advisorSearched && advisorResults.length===0 ? (
+          <View style={s.advisorNoMatch}>
+            <Text style={s.advisorNoMatchTitle}>Nie znalazłem mocnego dopasowania</Text>
+            <Text style={s.advisorNoMatchText}>Spróbuj opisać problem innymi słowami albo wybierz „Wszystkie książki”. Im więcej własnych notatek zapiszesz, tym lepiej ta funkcja działa.</Text>
+          </View>
+        ) : null}
+
+        {advisorResults.length ? (
+          <>
+            <Text style={s.advisorLabel}>NAJBARDZIEJ PASUJE</Text>
+            {advisorResults.map((item,index)=>(
+              <View key={item.id} style={s.advisorResult}>
+                <View style={s.advisorResultTop}>
+                  <Text style={s.advisorRank}>{index+1}</Text>
+                  <View style={{flex:1}}>
+                    <Text style={s.advisorBook}>{item.bookTitle}</Text>
+                    <Text style={s.advisorSource}>{item.label}{item.page?` · str. ${item.page}`:''}</Text>
+                  </View>
+                </View>
+                <Text style={s.advisorQuote}>“{item.text}”</Text>
+                <Pressable onPress={()=>openAdvisorBook(item.bookId)} style={s.advisorOpen}>
+                  <Text style={s.advisorOpenText}>OTWÓRZ KSIĄŻKĘ →</Text>
+                </Pressable>
+              </View>
+            ))}
+
+            <View style={s.applyNow}>
+              <Text style={s.applyNowKicker}>ZASTOSUJ TERAZ</Text>
+              <Text style={s.applyNowTitle}>Jedna konkretna rzecz</Text>
+              <Text style={s.applyNowText}>Nie kończ na przeczytaniu notatki. Zapisz jedno działanie wynikające z tego, co właśnie znalazłeś.</Text>
+              <TextInput
+                style={[s.input,s.applyNowInput]}
+                placeholder="Np. odkładam telefon do drugiego pokoju i robię 50 min pracy..."
+                placeholderTextColor="#716A5E"
+                value={advisorAction}
+                onChangeText={setAdvisorAction}
+                multiline
+                textAlignVertical="top"
+              />
+              <Button label="ZAPISZ JAKO „ZASTOSUJĘ”" onPress={saveAdvisorAction}/>
+            </View>
+          </>
+        ) : null}
+      </ScrollView>
+    );
+  }
+
   function BooksScreen() {
     return (
       <View style={{flex:1}}>
@@ -226,6 +565,7 @@ export default function App() {
                   <Text style={s.bookAuthor}>{item.author||'Autor niepodany'}</Text>
                   <View style={s.metaRow}>
                     <Text style={s.meta}>{(item.notes||[]).length} notatek</Text>
+                    {memorySentenceCount(item)>0 ? <Text style={s.memoryMeta}>🧠 {memorySentenceCount(item)}/3</Text> : null}
                     {item.finished ? <Text style={s.done}>PRZECZYTANA</Text> : null}
                   </View>
                 </View>
@@ -240,8 +580,27 @@ export default function App() {
 
   function TodayScreen() {
     return (
-      <ScrollView contentContainerStyle={{paddingBottom:110}}>
-        <Header title="Jedna lekcja na dziś" subtitle="WRÓĆ DO TEGO, CO JUŻ PRZECZYTAŁEŚ"/>
+      <ScrollView contentContainerStyle={{paddingBottom:110}} keyboardShouldPersistTaps="handled">
+        <Header title="Dzisiaj" subtitle="PAMIĘTAJ TO, CO WAŻNE"/>
+
+        {activeWeekly ? (
+          <View style={s.weekCard}>
+            <Text style={s.weekKicker}>★ IDEA NA TEN TYDZIEŃ</Text>
+            <Text style={s.weekText}>“{activeWeekly.text}”</Text>
+            <Text style={s.weekBook}>{activeWeekly.bookTitle}</Text>
+            <View style={{marginTop:16}}>
+              <Button label="OTWÓRZ KSIĄŻKĘ" secondary onPress={()=>{setSelectedId(activeWeekly.bookId);setTab('books')}}/>
+            </View>
+          </View>
+        ) : (
+          <View style={s.weekEmpty}>
+            <Text style={s.weekKicker}>★ IDEA NA TEN TYDZIEŃ</Text>
+            <Text style={s.weekEmptyTitle}>Wybierz jedną rzecz, którą chcesz nosić w głowie przez 7 dni.</Text>
+            <Text style={s.weekEmptyBody}>Otwórz książkę → „Zapamiętaj tę książkę” → wybierz jedno z 3 najważniejszych zdań.</Text>
+          </View>
+        )}
+
+        <Text style={s.sectionKicker}>JEDNA LEKCJA NA DZIŚ</Text>
         {daily ? (
           <View style={s.lesson}>
             <Text style={s.lessonBook}>{daily.bookTitle}</Text>
@@ -257,8 +616,8 @@ export default function App() {
             body="Kiedy dodasz pierwsze myśli z książek, codziennie pokażę Ci jedną z nich."/>
         )}
         <View style={s.info}>
-          <Text style={s.infoTitle}>Jak z tego korzystać?</Text>
-          <Text style={s.infoText}>Nie streszczaj całej książki. Łap to, co Cię zatrzymało, zmieniło sposób myślenia albo naprawdę chcesz zastosować.</Text>
+          <Text style={s.infoTitle}>Najpierw przypomnij sobie sam</Text>
+          <Text style={s.infoText}>Najwięcej zapamiętujesz wtedy, gdy próbujesz odtworzyć wiedzę bez patrzenia. W przeczytanej książce użyj przycisku „Z PAMIĘCI”, a dopiero później odsłoń swoje 3 zdania.</Text>
         </View>
       </ScrollView>
     );
@@ -270,11 +629,15 @@ export default function App() {
     const strongest=notes.filter(n=>['remember','idea','reflection'].includes(n.type)&&n.text);
     const apply=notes.filter(n=>n.type==='apply'&&n.text);
     const questions=notes.filter(n=>n.type==='question'&&n.text);
+    const memory=getMemory(selected);
+    const hasMemory=memorySentenceCount(selected)>0;
+    const complete=memoryComplete(selected);
+
     return (
       <View style={{flex:1}}>
         <Header title={selected.title} subtitle={selected.author||'TWOJA MAPA'} onBack={()=>setSelectedId(null)}
           right={<Button label="+ NOTATKA" small onPress={()=>setNoteModal(true)}/>}/>
-        <ScrollView contentContainerStyle={{paddingBottom:80}}>
+        <ScrollView contentContainerStyle={{paddingBottom:80}} keyboardShouldPersistTaps="handled">
           <View style={s.hero}>
             {selected.cover
               ? <Image source={{uri:selected.cover}} style={s.heroCover}/>
@@ -288,6 +651,43 @@ export default function App() {
                 <Button label="USUŃ" danger onPress={deleteBook}/>
               </View>
             </View>
+          </View>
+
+          <View style={s.memoryCard}>
+            <Text style={s.memoryKicker}>🧠 ZAPAMIĘTAJ TĘ KSIĄŻKĘ</Text>
+            <Text style={s.memoryTitle}>3 pytania, żeby coś zostało</Text>
+            <Text style={s.memoryIntro}>Nie streszczaj książki. Wybierz tylko to, co chcesz umieć odtworzyć z pamięci za kilka miesięcy.</Text>
+            <View style={s.memoryActions}>
+              <Button label={complete?'EDYTUJ 3 PYTANIA':'UZUPEŁNIJ 3 PYTANIA'} onPress={()=>openMemory(selected)}/>
+              <Button label="Z PAMIĘCI" secondary disabled={!hasMemory} onPress={openRecall}/>
+            </View>
+
+            {hasMemory ? (
+              <View style={s.memorySaved}>
+                <Text style={s.memorySection}>1. 3 NAJWAŻNIEJSZE ZDANIA</Text>
+                {memory.sentences.map((sentence,index)=> sentence.trim() ? (
+                  <View key={index} style={s.sentenceCard}>
+                    <View style={s.sentenceNumber}><Text style={s.sentenceNumberText}>{index+1}</Text></View>
+                    <View style={{flex:1}}>
+                      <Text style={s.sentenceText}>{sentence}</Text>
+                      <Pressable style={s.weekPick} onPress={()=>setWeeklyIdea(sentence,index)}>
+                        <Text style={s.weekPickText}>{activeWeekly?.bookId===selected.id && activeWeekly?.text===sentence ? '★ IDEA TEGO TYGODNIA' : '☆ USTAW NA TEN TYDZIEŃ'}</Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                ) : null)}
+
+                {memory.meaning ? <>
+                  <Text style={s.memorySection}>2. WŁASNYMI SŁOWAMI</Text>
+                  <Text style={s.memoryAnswer}>{memory.meaning}</Text>
+                </> : null}
+                {memory.action ? <>
+                  <Text style={s.memorySection}>3. CO ZROBIĘ INACZEJ</Text>
+                  <Text style={s.memoryAnswer}>{memory.action}</Text>
+                </> : null}
+                {memory.lastRecallAt ? <Text style={s.lastRecall}>Ostatnia próba z pamięci: {dateLabel(memory.lastRecallAt)}</Text> : null}
+              </View>
+            ) : null}
           </View>
 
           {selected.finished && notes.length ? (
@@ -322,11 +722,13 @@ export default function App() {
 
   if (!loaded) return <SafeAreaView style={s.safe}><View style={s.loading}><Text style={s.loadingText}>Mapa Książki</Text></View></SafeAreaView>;
 
+  const recallMemory = selected ? getMemory(selected) : emptyMemory();
+
   return (
     <SafeAreaView style={s.safe}>
       <KeyboardAvoidingView style={{flex:1}} behavior={Platform.OS==='ios'?'padding':undefined}>
         <View style={s.app}>
-          {selected ? <BookScreen/> : (tab==='books'?<BooksScreen/>:<TodayScreen/>)}
+          {selected ? <BookScreen/> : (tab==='books'?<BooksScreen/>:tab==='today'?<TodayScreen/>:renderAdvisorScreen())}
 
           {!selected ? (
             <View style={s.tabs}>
@@ -337,6 +739,10 @@ export default function App() {
               <Pressable style={s.tab} onPress={()=>setTab('today')}>
                 <Text style={[s.tabIcon,tab==='today'&&s.active]}>✦</Text>
                 <Text style={[s.tabText,tab==='today'&&s.active]}>DZISIAJ</Text>
+              </Pressable>
+              <Pressable style={s.tab} onPress={()=>setTab('advisor')}>
+                <Text style={[s.tabIcon,tab==='advisor'&&s.active]}>◎</Text>
+                <Text style={[s.tabText,tab==='advisor'&&s.active]}>DORADCA</Text>
               </Pressable>
             </View>
           ) : null}
@@ -366,7 +772,7 @@ export default function App() {
                   <Text style={s.kicker}>NOWA RZECZ DO MAPY</Text>
                   <Text style={s.modalTitle}>Co chcesz zachować?</Text>
 
-                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.typeRow}>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.typeRow} keyboardShouldPersistTaps="handled">
                     {TYPES.map(([k,e,l])=>(
                       <Pressable key={k} onPress={()=>setNoteType(k)} style={[s.typeBtn,noteType===k&&s.typeBtnActive]}>
                         <Text style={[s.typeText,noteType===k&&s.typeTextActive]}>{e} {l}</Text>
@@ -405,6 +811,105 @@ export default function App() {
               </ScrollView>
             </KeyboardAvoidingView>
           </Modal>
+
+          <Modal visible={memoryModal} transparent animationType="slide" onRequestClose={()=>setMemoryModal(false)}>
+            <KeyboardAvoidingView style={s.modalShade} behavior={Platform.OS==='ios'?'padding':'height'} keyboardVerticalOffset={20}>
+              <ScrollView contentContainerStyle={{flexGrow:1,justifyContent:'flex-end'}} keyboardShouldPersistTaps="handled">
+                <View style={s.sheetTall}>
+                  <Text style={s.kicker}>ZAPAMIĘTAJ TĘ KSIĄŻKĘ</Text>
+                  <Text style={s.modalTitle}>3 pytania</Text>
+
+                  <Text style={s.questionNo}>PYTANIE 1</Text>
+                  <Text style={s.questionTitle}>Jakie 3 zdania z tej książki chcę zapamiętać?</Text>
+                  {[0,1,2].map(i=>(
+                    <View key={i} style={s.numberedInputRow}>
+                      <View style={s.inputNumber}><Text style={s.inputNumberText}>{i+1}</Text></View>
+                      <TextInput
+                        style={[s.input,s.memoryInput]}
+                        placeholder={`Najważniejsze zdanie ${i+1}`}
+                        placeholderTextColor="#716A5E"
+                        value={memorySentences[i]}
+                        onChangeText={v=>updateMemorySentence(i,v)}
+                        multiline
+                        textAlignVertical="top"
+                      />
+                    </View>
+                  ))}
+
+                  <Text style={s.questionNo}>PYTANIE 2</Text>
+                  <Text style={s.questionTitle}>Co te zdania znaczą moimi własnymi słowami?</Text>
+                  <TextInput
+                    style={[s.input,s.textarea]}
+                    placeholder="Wyjaśnij to tak, jakbyś tłumaczył komuś bez patrzenia do książki..."
+                    placeholderTextColor="#716A5E"
+                    value={memoryMeaning}
+                    onChangeText={setMemoryMeaning}
+                    multiline
+                    textAlignVertical="top"
+                  />
+
+                  <Text style={s.questionNo}>PYTANIE 3</Text>
+                  <Text style={s.questionTitle}>Co konkretnie zrobię inaczej dzięki tej książce?</Text>
+                  <TextInput
+                    style={[s.input,s.textarea]}
+                    placeholder="Jedna konkretna zmiana, którą chcesz wprowadzić..."
+                    placeholderTextColor="#716A5E"
+                    value={memoryAction}
+                    onChangeText={setMemoryAction}
+                    multiline
+                    textAlignVertical="top"
+                  />
+
+                  <View style={s.modalActions}>
+                    <Button label="ANULUJ" secondary onPress={()=>setMemoryModal(false)}/>
+                    <Button label="ZAPISZ 3 PYTANIA" onPress={saveMemory}/>
+                  </View>
+                </View>
+              </ScrollView>
+            </KeyboardAvoidingView>
+          </Modal>
+
+          <Modal visible={recallModal} transparent animationType="slide" onRequestClose={()=>setRecallModal(false)}>
+            <KeyboardAvoidingView style={s.modalShade} behavior={Platform.OS==='ios'?'padding':'height'} keyboardVerticalOffset={20}>
+              <ScrollView contentContainerStyle={{flexGrow:1,justifyContent:'flex-end'}} keyboardShouldPersistTaps="handled">
+                <View style={s.sheetTall}>
+                  <Text style={s.kicker}>TRYB Z PAMIĘCI</Text>
+                  <Text style={s.modalTitle}>{selected?.title||'Książka'}</Text>
+                  <Text style={s.recallLead}>Bez podglądania: co pamiętasz z tej książki?</Text>
+                  <Text style={s.recallHint}>Spróbuj odtworzyć 3 najważniejsze idee własnymi słowami. Dopiero potem odsłoń zapisane zdania.</Text>
+                  <TextInput
+                    style={[s.input,s.recallInput]}
+                    placeholder="1. ...\n2. ...\n3. ..."
+                    placeholderTextColor="#716A5E"
+                    value={recallText}
+                    onChangeText={setRecallText}
+                    multiline
+                    textAlignVertical="top"
+                  />
+
+                  {!recallReveal ? (
+                    <Button label="POKAŻ MOJE 3 ZDANIA" onPress={revealRecall}/>
+                  ) : (
+                    <View style={s.revealBox}>
+                      <Text style={s.revealKicker}>PORÓWNAJ Z TYM, CO ZAPISAŁEŚ</Text>
+                      {recallMemory.sentences.map((x,i)=>x.trim()?<Text key={i} style={s.revealLine}>{i+1}. {x}</Text>:null)}
+                      {recallMemory.meaning ? <>
+                        <Text style={s.revealSub}>Własnymi słowami</Text>
+                        <Text style={s.revealBody}>{recallMemory.meaning}</Text>
+                      </> : null}
+                      {recallMemory.action ? <>
+                        <Text style={s.revealSub}>Co chciałeś zrobić inaczej</Text>
+                        <Text style={s.revealBody}>{recallMemory.action}</Text>
+                      </> : null}
+                    </View>
+                  )}
+                  <View style={s.modalActions}>
+                    <Button label="ZAMKNIJ" secondary onPress={()=>setRecallModal(false)}/>
+                  </View>
+                </View>
+              </ScrollView>
+            </KeyboardAvoidingView>
+          </Modal>
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -428,9 +933,11 @@ const s=StyleSheet.create({
   btnSmall:{paddingHorizontal:12,paddingVertical:10},
   btnSecondary:{backgroundColor:'transparent',borderWidth:1,borderColor:C.line},
   btnDanger:{backgroundColor:'transparent',borderWidth:1,borderColor:'#4B2929'},
+  btnDisabled:{opacity:.38},
   btnText:{color:'#171109',fontWeight:'900',fontSize:11},
   btnTextSecondary:{color:C.text},
   btnTextDanger:{color:C.red},
+  btnTextDisabled:{color:C.muted},
 
   empty:{backgroundColor:C.panel,borderWidth:1,borderColor:C.line,borderRadius:20,padding:22,marginTop:10},
   emptyTitle:{color:C.text,fontSize:21,fontWeight:'900'},
@@ -444,8 +951,18 @@ const s=StyleSheet.create({
   bookAuthor:{color:C.muted,marginTop:4,fontSize:13},
   metaRow:{flexDirection:'row',gap:8,alignItems:'center',marginTop:10,flexWrap:'wrap'},
   meta:{color:C.muted,fontSize:11},
+  memoryMeta:{color:C.gold,fontSize:10,fontWeight:'800'},
   done:{color:C.green,fontSize:9,fontWeight:'900',letterSpacing:1},
   chev:{color:C.gold,fontSize:32},
+
+  weekCard:{backgroundColor:'#1A150C',borderWidth:1,borderColor:'#66502A',borderRadius:22,padding:22,marginBottom:18},
+  weekKicker:{color:C.gold,fontSize:10,fontWeight:'900',letterSpacing:1.4},
+  weekText:{color:C.text,fontSize:24,fontWeight:'900',lineHeight:33,marginTop:15},
+  weekBook:{color:C.muted,fontSize:12,marginTop:12},
+  weekEmpty:{backgroundColor:C.panel,borderWidth:1,borderColor:C.line,borderRadius:20,padding:20,marginBottom:18},
+  weekEmptyTitle:{color:C.text,fontSize:17,fontWeight:'900',lineHeight:23,marginTop:10},
+  weekEmptyBody:{color:C.muted,fontSize:13,lineHeight:20,marginTop:8},
+  sectionKicker:{color:C.muted,fontSize:10,fontWeight:'900',letterSpacing:1.4,marginBottom:10,marginTop:4},
 
   lesson:{backgroundColor:C.panel,borderWidth:1,borderColor:'#4A3C22',borderRadius:22,padding:24},
   lessonBook:{color:C.gold,fontSize:12,fontWeight:'900',letterSpacing:1},
@@ -454,6 +971,34 @@ const s=StyleSheet.create({
   info:{marginTop:16,backgroundColor:C.panel,borderRadius:18,padding:20,borderWidth:1,borderColor:C.line},
   infoTitle:{color:C.text,fontWeight:'900',fontSize:17},
   infoText:{color:C.muted,lineHeight:21,marginTop:8},
+
+  advisorIntro:{backgroundColor:'#15120C',borderWidth:1,borderColor:'#4A3C22',borderRadius:20,padding:20,marginBottom:16},
+  advisorIntroTitle:{color:C.text,fontSize:20,fontWeight:'900'},
+  advisorIntroText:{color:C.muted,fontSize:13,lineHeight:20,marginTop:8},
+  advisorLabel:{color:C.gold,fontSize:10,fontWeight:'900',letterSpacing:1.3,marginTop:6,marginBottom:9},
+  scopeRow:{gap:8,paddingBottom:12},
+  scopeChip:{maxWidth:180,borderWidth:1,borderColor:C.line,backgroundColor:C.panel,borderRadius:999,paddingHorizontal:13,paddingVertical:9},
+  scopeChipActive:{borderColor:C.gold,backgroundColor:'#2A2214'},
+  scopeText:{color:C.muted,fontSize:10,fontWeight:'900'},
+  scopeTextActive:{color:C.gold},
+  advisorInput:{minHeight:125,fontSize:16,lineHeight:23},
+  advisorButtons:{flexDirection:'row',gap:9,flexWrap:'wrap',marginBottom:18},
+  advisorNoMatch:{backgroundColor:C.panel,borderWidth:1,borderColor:C.line,borderRadius:18,padding:18,marginTop:2},
+  advisorNoMatchTitle:{color:C.text,fontWeight:'900',fontSize:17},
+  advisorNoMatchText:{color:C.muted,lineHeight:20,fontSize:13,marginTop:7},
+  advisorResult:{backgroundColor:C.panel,borderWidth:1,borderColor:C.line,borderRadius:18,padding:17,marginBottom:11},
+  advisorResultTop:{flexDirection:'row',alignItems:'center',gap:10},
+  advisorRank:{width:28,height:28,borderRadius:999,backgroundColor:'#2B2315',color:C.gold,textAlign:'center',fontWeight:'900',fontSize:12,lineHeight:28},
+  advisorBook:{color:C.gold,fontSize:11,fontWeight:'900'},
+  advisorSource:{color:C.muted,fontSize:10,marginTop:3},
+  advisorQuote:{color:C.text,fontSize:17,lineHeight:25,fontWeight:'700',marginTop:14},
+  advisorOpen:{alignSelf:'flex-start',paddingTop:12,paddingBottom:2},
+  advisorOpenText:{color:C.gold,fontSize:9,fontWeight:'900',letterSpacing:.8},
+  applyNow:{backgroundColor:'#17130D',borderWidth:1,borderColor:'#5B4828',borderRadius:21,padding:20,marginTop:8},
+  applyNowKicker:{color:C.gold,fontSize:10,fontWeight:'900',letterSpacing:1.3},
+  applyNowTitle:{color:C.text,fontSize:21,fontWeight:'900',marginTop:7},
+  applyNowText:{color:C.muted,fontSize:13,lineHeight:20,marginTop:7,marginBottom:12},
+  applyNowInput:{minHeight:92},
 
   tabs:{position:'absolute',left:18,right:18,bottom:12,height:68,backgroundColor:'#11100D',borderWidth:1,borderColor:C.line,borderRadius:22,flexDirection:'row'},
   tab:{flex:1,alignItems:'center',justifyContent:'center'},
@@ -465,6 +1010,22 @@ const s=StyleSheet.create({
   heroCover:{width:92,height:132,borderRadius:12,backgroundColor:C.panel2},
   heroTitle:{color:C.text,fontSize:22,fontWeight:'900'},
   actionRow:{flexDirection:'row',flexWrap:'wrap',gap:8,marginTop:14},
+
+  memoryCard:{backgroundColor:'#12100C',borderWidth:1,borderColor:'#5B4828',borderRadius:22,padding:20,marginBottom:18},
+  memoryKicker:{color:C.gold,fontSize:10,fontWeight:'900',letterSpacing:1.2},
+  memoryTitle:{color:C.text,fontSize:22,fontWeight:'900',marginTop:8},
+  memoryIntro:{color:C.muted,fontSize:13,lineHeight:20,marginTop:8},
+  memoryActions:{flexDirection:'row',flexWrap:'wrap',gap:9,marginTop:16},
+  memorySaved:{marginTop:20,borderTopWidth:1,borderTopColor:C.line,paddingTop:4},
+  memorySection:{color:C.gold,fontSize:10,fontWeight:'900',letterSpacing:1.2,marginTop:18,marginBottom:9},
+  memoryAnswer:{color:C.text,fontSize:15,lineHeight:22,backgroundColor:C.panel,borderRadius:13,padding:14,borderWidth:1,borderColor:C.line},
+  sentenceCard:{flexDirection:'row',gap:10,backgroundColor:C.panel,borderWidth:1,borderColor:C.line,borderRadius:14,padding:13,marginBottom:9},
+  sentenceNumber:{width:27,height:27,borderRadius:999,backgroundColor:'#2B2315',alignItems:'center',justifyContent:'center'},
+  sentenceNumberText:{color:C.gold,fontWeight:'900',fontSize:12},
+  sentenceText:{color:C.text,fontSize:15,lineHeight:22,fontWeight:'700'},
+  weekPick:{alignSelf:'flex-start',marginTop:9,paddingVertical:5},
+  weekPickText:{color:C.gold,fontWeight:'900',fontSize:9,letterSpacing:.7},
+  lastRecall:{color:C.muted,fontSize:10,marginTop:15},
 
   summary:{backgroundColor:'#17130D',borderWidth:1,borderColor:'#4A3C22',borderRadius:20,padding:20,marginBottom:18},
   summaryKicker:{color:C.gold,fontWeight:'900',fontSize:10,letterSpacing:1.3},
@@ -483,12 +1044,19 @@ const s=StyleSheet.create({
   noteImage:{width:'100%',height:220,borderRadius:12,marginTop:12,backgroundColor:C.panel2},
   notePage:{color:C.muted,fontSize:10,marginTop:10},
 
-  modalShade:{flex:1,backgroundColor:'rgba(0,0,0,.75)',justifyContent:'flex-end'},
+  modalShade:{flex:1,backgroundColor:'rgba(0,0,0,.78)',justifyContent:'flex-end'},
   sheet:{backgroundColor:'#11100D',borderTopLeftRadius:26,borderTopRightRadius:26,borderWidth:1,borderColor:C.line,padding:20,paddingBottom:28},
+  sheetTall:{backgroundColor:'#11100D',borderTopLeftRadius:26,borderTopRightRadius:26,borderWidth:1,borderColor:C.line,padding:20,paddingBottom:34,maxHeight:'94%'},
   modalTitle:{color:C.text,fontSize:26,fontWeight:'900',marginTop:4,marginBottom:18},
-  modalActions:{flexDirection:'row',gap:10,justifyContent:'flex-end',marginTop:14},
+  modalActions:{flexDirection:'row',gap:10,justifyContent:'flex-end',marginTop:14,flexWrap:'wrap'},
   input:{backgroundColor:C.bg,borderWidth:1,borderColor:C.line,color:C.text,borderRadius:13,paddingHorizontal:14,paddingVertical:13,marginBottom:10,fontSize:15},
   textarea:{minHeight:115},
+  memoryInput:{flex:1,minHeight:76,marginBottom:0},
+  numberedInputRow:{flexDirection:'row',alignItems:'flex-start',gap:9,marginBottom:10},
+  inputNumber:{width:28,height:28,borderRadius:999,backgroundColor:'#2B2315',alignItems:'center',justifyContent:'center',marginTop:10},
+  inputNumberText:{color:C.gold,fontSize:12,fontWeight:'900'},
+  questionNo:{color:C.gold,fontSize:9,fontWeight:'900',letterSpacing:1.3,marginTop:8},
+  questionTitle:{color:C.text,fontSize:17,fontWeight:'900',lineHeight:23,marginTop:4,marginBottom:10},
   coverPicker:{width:92,height:132,borderRadius:12,borderWidth:1,borderStyle:'dashed',borderColor:C.gold,backgroundColor:C.panel,alignItems:'center',justifyContent:'center',marginBottom:14},
   coverPickerImage:{width:92,height:132,borderRadius:12},
   coverPickerText:{color:C.gold,fontSize:10,fontWeight:'900'},
@@ -500,4 +1068,13 @@ const s=StyleSheet.create({
   photoPicker:{minHeight:150,borderRadius:14,borderWidth:1,borderStyle:'dashed',borderColor:C.gold,backgroundColor:C.panel,alignItems:'center',justifyContent:'center',marginBottom:12,overflow:'hidden'},
   photoPickerText:{color:C.gold,fontWeight:'900',fontSize:12},
   photoPreview:{width:'100%',height:220},
+
+  recallLead:{color:C.text,fontSize:20,fontWeight:'900',lineHeight:27},
+  recallHint:{color:C.muted,fontSize:13,lineHeight:20,marginTop:7,marginBottom:14},
+  recallInput:{minHeight:170},
+  revealBox:{backgroundColor:'#17130D',borderWidth:1,borderColor:'#4A3C22',borderRadius:17,padding:16,marginTop:14},
+  revealKicker:{color:C.gold,fontSize:9,fontWeight:'900',letterSpacing:1.2,marginBottom:12},
+  revealLine:{color:C.text,fontSize:15,lineHeight:22,marginBottom:9,fontWeight:'700'},
+  revealSub:{color:C.gold,fontSize:10,fontWeight:'900',letterSpacing:.8,marginTop:10,marginBottom:5},
+  revealBody:{color:C.muted,fontSize:14,lineHeight:21},
 });
