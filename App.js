@@ -54,6 +54,55 @@ const getMemory = book => {
     lastRecallText:m.lastRecallText || ''
   };
 };
+const getFullSummary = book => typeof book?.fullSummary === 'string' ? book.fullSummary : '';
+const summaryWordCount = value => (String(value||'').trim().match(/\S+/g) || []).length;
+
+// Szkic nie jest streszczeniem generowanym przez AI: tylko układa własne notatki
+// i pozostawia miejsce na dopisanie treści całej książki.
+const buildSummaryDraft = book => {
+  const memory = getMemory(book);
+  const notes = [...(book.notes || [])]
+    .filter(n => n.type !== 'photo' && (n.text || '').trim())
+    .sort((a,b) => Number(!!b.starred) - Number(!!a.starred));
+  const ideas = [];
+  const already = new Set();
+  const addIdea = value => {
+    const text = String(value || '').trim();
+    if (!text) return;
+    const key = text.toLocaleLowerCase('pl-PL');
+    if (already.has(key)) return;
+    already.add(key);
+    ideas.push(text);
+  };
+  memory.sentences.forEach(addIdea);
+  notes.filter(n => ['remember','idea','reflection'].includes(n.type))
+    .forEach(n => { if (ideas.length < 12) addIdea(n.text); });
+  const applications = [];
+  if (memory.action.trim()) applications.push(memory.action.trim());
+  notes.filter(n => n.type === 'apply').slice(0,5).forEach(n => {
+    if (!applications.includes(n.text.trim())) applications.push(n.text.trim());
+  });
+
+  return [
+    `PODSUMOWANIE: ${book.title}`,
+    book.author ? `Autor: ${book.author}` : '',
+    '',
+    'O CZYM JEST TA KSIĄŻKA?',
+    '[Opisz własnymi słowami temat i przebieg całej książki.]',
+    '',
+    'GŁÓWNE TEMATY I NAJWAŻNIEJSZE IDEE',
+    ideas.length ? ideas.map((x,i)=>`${i+1}. ${x}`).join('\n') : '[Wpisz główne tematy i ważne idee.]',
+    '',
+    'CO ZROZUMIAŁEM Z TEJ KSIĄŻKI?',
+    memory.meaning.trim() || '[Własne wnioski i przemyślenia.]',
+    '',
+    'CO ZAMIERZAM WYKORZYSTAĆ?',
+    applications.length ? applications.map(x=>`• ${x}`).join('\n') : '[Jedna lub kilka rzeczy do zastosowania.]',
+    '',
+    'PODSUMOWANIE WŁASNYMI SŁOWAMI',
+    '[Napisz, jak opowiedziałbyś komuś o tej książce od początku do końca.]'
+  ].filter((line,index,all)=>line || (index>0 && all[index-1]!=='' )).join('\n');
+};
 const memorySentenceCount = book => getMemory(book).sentences.filter(x => x.trim()).length;
 const memoryComplete = book => {
   const m = getMemory(book);
@@ -226,6 +275,9 @@ export default function App() {
   const [noteModal,setNoteModal] = useState(false);
   const [memoryModal,setMemoryModal] = useState(false);
   const [recallModal,setRecallModal] = useState(false);
+  const [summaryModal,setSummaryModal] = useState(false);
+  const [summaryEditing,setSummaryEditing] = useState(false);
+  const [summaryDraft,setSummaryDraft] = useState('');
 
   const [bookTitle,setBookTitle] = useState('');
   const [bookAuthor,setBookAuthor] = useState('');
@@ -424,6 +476,58 @@ export default function App() {
       return {...b,memory:{...old,sentences,meaning:memoryMeaning.trim(),action:memoryAction.trim(),updatedAt:Date.now()}};
     })}));
     setMemoryModal(false);
+  }
+
+  function openFullSummary(book=selected) {
+    if (!book) return;
+    const value = getFullSummary(book);
+    setSummaryDraft(value);
+    setSummaryEditing(!value.trim());
+    setSummaryModal(true);
+  }
+
+  function closeFullSummary() {
+    if (summaryEditing && summaryDraft !== getFullSummary(selected)) {
+      Alert.alert('Niezapisane zmiany','Zamknąć bez zapisywania podsumowania?', [
+        {text:'Zostań',style:'cancel'},
+        {text:'Odrzuć zmiany',style:'destructive',onPress:()=>setSummaryModal(false)}
+      ]);
+      return;
+    }
+    setSummaryModal(false);
+  }
+
+  function saveFullSummary() {
+    if (!selected) return;
+    const text = summaryDraft.trim();
+    if (!text) return Alert.alert('Puste podsumowanie','Napisz podsumowanie albo użyj przycisku „Szkic z notatek”.');
+    setData(d => ({...d,books:d.books.map(b => b.id === selected.id
+      ? {...b,fullSummary:text,fullSummaryUpdatedAt:Date.now()} : b)}));
+    setSummaryDraft(text);
+    setSummaryEditing(false);
+  }
+
+  function draftFullSummary() {
+    if (!selected) return;
+    const apply = () => setSummaryDraft(buildSummaryDraft(selected));
+    if (!summaryDraft.trim()) return apply();
+    Alert.alert('Zastąpić aktualny tekst?', 'Szkic zastąpi to, co jest teraz w polu edycji. Zapisane podsumowanie nie zmieni się, dopóki nie klikniesz „Zapisz”.', [
+      {text:'Anuluj',style:'cancel'},
+      {text:'Utwórz szkic',onPress:apply}
+    ]);
+  }
+
+  function deleteFullSummary() {
+    if (!selected) return;
+    Alert.alert('Usunąć podsumowanie?', 'Pozostałe notatki i 3 pytania nie zostaną usunięte.', [
+      {text:'Anuluj',style:'cancel'},
+      {text:'Usuń',style:'destructive',onPress:()=>{
+        setData(d=>({...d,books:d.books.map(b=>b.id===selected.id
+          ? {...b,fullSummary:'',fullSummaryUpdatedAt:null} : b)}));
+        setSummaryDraft('');
+        setSummaryEditing(true);
+      }}
+    ]);
   }
 
   function openRecall() {
@@ -632,6 +736,7 @@ export default function App() {
                   <View style={s.metaRow}>
                     <Text style={s.meta}>{(item.notes||[]).length} notatek</Text>
                     {memorySentenceCount(item)>0 ? <Text style={s.memoryMeta}>🧠 {memorySentenceCount(item)}/3</Text> : null}
+                    {getFullSummary(item).trim() ? <Text style={s.memoryMeta}>✍ PODSUMOWANIE</Text> : null}
                     {item.finished ? <Text style={s.done}>PRZECZYTANA</Text> : null}
                   </View>
                 </View>
@@ -754,6 +859,28 @@ export default function App() {
                 {memory.lastRecallAt ? <Text style={s.lastRecall}>Ostatnia próba z pamięci: {dateLabel(memory.lastRecallAt)}</Text> : null}
               </View>
             ) : null}
+          </View>
+
+          <View style={s.fullSummaryCard}>
+            <Text style={s.fullSummaryKicker}>📖 PODSUMOWANIE CAŁEJ KSIĄŻKI</Text>
+            <Text style={s.fullSummaryTitle}>{getFullSummary(selected).trim() ? 'Twoje podsumowanie' : 'Zapisz całą książkę własnymi słowami'}</Text>
+            <Text style={s.fullSummaryDescription}>
+              {getFullSummary(selected).trim()
+                ? 'Wróć do całej treści w każdej chwili. Możesz ją czytać, uzupełniać i poprawiać.'
+                : 'Nie tylko 3 najważniejsze myśli — tutaj masz miejsce na długie podsumowanie książki, od początku do końca.'}
+            </Text>
+            {getFullSummary(selected).trim() ? (
+              <>
+                <Text style={s.fullSummaryPreview} numberOfLines={5}>{getFullSummary(selected)}</Text>
+                <Text style={s.fullSummaryMeta}>
+                  {summaryWordCount(getFullSummary(selected))} słów
+                  {selected.fullSummaryUpdatedAt ? `  •  Zapisano ${dateLabel(selected.fullSummaryUpdatedAt)}` : ''}
+                </Text>
+              </>
+            ) : null}
+            <View style={{marginTop:16}}>
+              <Button label={getFullSummary(selected).trim() ? 'OTWÓRZ PODSUMOWANIE' : 'NAPISZ PODSUMOWANIE'} onPress={()=>openFullSummary(selected)}/>
+            </View>
           </View>
 
           {selected.finished && notes.length ? (
@@ -958,6 +1085,69 @@ export default function App() {
             </KeyboardAvoidingView>
           </Modal>
 
+          <Modal visible={summaryModal} animationType="slide" onRequestClose={closeFullSummary}>
+            <SafeAreaView style={s.fullSummarySafe}>
+              <KeyboardAvoidingView style={{flex:1}} behavior={Platform.OS==='ios'?'padding':undefined}>
+                <View style={s.fullSummaryHeader}>
+                  <View style={{flex:1}}>
+                    <Text style={s.kicker}>PODSUMOWANIE CAŁEJ KSIĄŻKI</Text>
+                    <Text style={s.fullSummaryBookName} numberOfLines={2}>{selected?.title || 'Książka'}</Text>
+                  </View>
+                  <Pressable onPress={closeFullSummary} style={s.fullSummaryClose}>
+                    <Text style={s.fullSummaryCloseText}>ZAMKNIJ ✕</Text>
+                  </Pressable>
+                </View>
+
+                {summaryEditing ? (
+                  <ScrollView style={{flex:1}} contentContainerStyle={s.fullSummaryBody} keyboardShouldPersistTaps="always" keyboardDismissMode="none" showsVerticalScrollIndicator>
+                    <Text style={s.fullSummaryHelp}>Opisz całą książkę po swojemu: główne tematy, rozwój myśli autora, najważniejsze rozdziały i Twoje wnioski. Tekst może być dowolnie długi.</Text>
+                    <TextInput
+                      style={s.fullSummaryInput}
+                      placeholder="O czym jest książka? Jakie są jej najważniejsze idee i co warto z niej zapamiętać? Napisz tutaj całe podsumowanie..."
+                      placeholderTextColor="#716A5E"
+                      value={summaryDraft}
+                      onChangeText={setSummaryDraft}
+                      multiline
+                      scrollEnabled
+                      textAlignVertical="top"
+                      autoCorrect
+                    />
+                    <Text style={s.fullSummaryMeta}>{summaryWordCount(summaryDraft)} słów</Text>
+                    <View style={{marginTop:12,marginBottom:22}}>
+                      <Button label="UTWÓRZ SZKIC Z MOICH NOTATEK" secondary onPress={draftFullSummary}/>
+                      <Text style={s.fullSummaryTip}>Szkic zbiera wyłącznie Twoje notatki i 3 pytania. Nie jest streszczeniem wygenerowanym z pełnej treści książki. Możesz go dowolnie poprawiać.</Text>
+                    </View>
+                  </ScrollView>
+                ) : (
+                  <ScrollView style={{flex:1}} contentContainerStyle={s.fullSummaryBody} showsVerticalScrollIndicator>
+                    <Text style={s.fullSummaryReadText} selectable>{getFullSummary(selected)}</Text>
+                    <Text style={[s.fullSummaryMeta,{marginTop:18}]}>
+                      {summaryWordCount(getFullSummary(selected))} słów
+                      {selected?.fullSummaryUpdatedAt ? `  •  Zapisano ${dateLabel(selected.fullSummaryUpdatedAt)}` : ''}
+                    </Text>
+                    <View style={{marginTop:24,marginBottom:28}}>
+                      <Button label="USUŃ PODSUMOWANIE" danger onPress={deleteFullSummary}/>
+                    </View>
+                  </ScrollView>
+                )}
+
+                <View style={s.fullSummaryFooter}>
+                  {summaryEditing ? (
+                    <>
+                      <View style={{flex:1}}><Button label="ANULUJ" secondary onPress={closeFullSummary}/></View>
+                      <View style={{flex:1.8}}><Button label="ZAPISZ PODSUMOWANIE" onPress={saveFullSummary}/></View>
+                    </>
+                  ) : (
+                    <>
+                      <View style={{flex:1}}><Button label="ZAMKNIJ" secondary onPress={closeFullSummary}/></View>
+                      <View style={{flex:1.6}}><Button label="EDYTUJ" onPress={()=>setSummaryEditing(true)}/></View>
+                    </>
+                  )}
+                </View>
+              </KeyboardAvoidingView>
+            </SafeAreaView>
+          </Modal>
+
           <Modal visible={recallModal} transparent animationType="slide" onRequestClose={()=>setRecallModal(false)}>
             <KeyboardAvoidingView style={s.modalShade} behavior={Platform.OS==='ios'?'padding':'height'} keyboardVerticalOffset={20}>
               <ScrollView contentContainerStyle={{flexGrow:1,justifyContent:'flex-end'}} keyboardShouldPersistTaps="handled">
@@ -1120,6 +1310,24 @@ const s=StyleSheet.create({
   summaryKicker:{color:C.gold,fontWeight:'900',fontSize:10,letterSpacing:1.3},
   summaryTitle:{color:C.text,fontSize:18,fontWeight:'900',marginTop:8,marginBottom:8},
   summaryLine:{color:'#DED6C7',lineHeight:21,marginBottom:6},
+
+  fullSummaryCard:{backgroundColor:'#15130F',borderWidth:1,borderColor:'#63502C',borderRadius:20,padding:20,marginBottom:18},
+  fullSummaryKicker:{color:C.gold,fontSize:10,fontWeight:'900',letterSpacing:1.1},
+  fullSummaryTitle:{color:C.text,fontSize:21,fontWeight:'900',marginTop:9,lineHeight:28},
+  fullSummaryDescription:{color:C.muted,fontSize:13,lineHeight:20,marginTop:8},
+  fullSummaryPreview:{color:C.text,fontSize:14,lineHeight:22,marginTop:15},
+  fullSummaryMeta:{color:C.gold,fontSize:11,marginTop:11,fontWeight:'700'},
+  fullSummarySafe:{flex:1,backgroundColor:C.bg},
+  fullSummaryHeader:{paddingHorizontal:18,paddingTop:16,paddingBottom:15,borderBottomWidth:1,borderBottomColor:C.line,flexDirection:'row',alignItems:'center',gap:10},
+  fullSummaryBookName:{color:C.text,fontWeight:'900',fontSize:19,marginTop:5},
+  fullSummaryClose:{borderColor:C.line,borderWidth:1,borderRadius:12,paddingHorizontal:10,paddingVertical:10},
+  fullSummaryCloseText:{color:C.muted,fontSize:10,fontWeight:'900'},
+  fullSummaryBody:{padding:18,paddingBottom:35},
+  fullSummaryHelp:{color:C.muted,fontSize:13,lineHeight:20,marginBottom:14},
+  fullSummaryInput:{color:C.text,backgroundColor:C.panel,borderWidth:1,borderColor:C.line,borderRadius:16,padding:16,fontSize:16,lineHeight:24,height:380},
+  fullSummaryTip:{color:C.muted,fontSize:11,lineHeight:18,marginTop:11},
+  fullSummaryReadText:{color:C.text,fontSize:16,lineHeight:27},
+  fullSummaryFooter:{paddingHorizontal:18,paddingVertical:12,borderTopWidth:1,borderTopColor:C.line,flexDirection:'row',gap:9,backgroundColor:C.bg},
 
   legend:{gap:8,paddingBottom:14},
   legendPill:{backgroundColor:C.panel2,borderRadius:999,borderWidth:1,borderColor:C.line,paddingHorizontal:11,paddingVertical:8},
